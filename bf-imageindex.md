@@ -35,7 +35,7 @@ sure we always have the database available and catch any outages ASAP.
 
 The DB object, and any database-related interactions, should be implemented in
 a "common" package, which can then be appropriately used by the various runtime
-modes of `bf-ia-broker` (see the "Runtime Modes" section). This would ensure the
+modes of `bf-ia-broker` (see the [Runtime Modes](#runtime-modes) section). This would ensure the
 code is DRY and easily maintainable.
 
 #### Schema management
@@ -58,7 +58,7 @@ pipeline's "Deploy" step. They should be called using `cf run-task` after the
 `cf start` fails, then `cf run-task` can be called again with a migration
 rollback.
 
-More details on the migration runtime mode can be found under "Runtime Modes"
+More details on the migration runtime mode can be found under [Runtime Modes](#runtime-modes)
 below.
 
 #### PostGIS support (!)
@@ -178,4 +178,22 @@ func TestGetBlogTitleList_Error(t *testing.T) {
 Runtime Modes
 ---
 
-// TODO
+Beachfront 1.0 and 2.0 implementations of `bf-ia-broker` featured it as a
+single executable binary that ran as a HTTP microservice. This was launched by
+running `bf-ia-broker serve`, and configured itself using the environment.
+It had another (virtually unused) command that just printed its version as well:
+`bf-ia-broker version`. These "subcommands" &mdash; serve and version &mdash;
+can be considered to be different "runtime modes" that the code runs under; one
+launches a web server, while the other just prints some stuff and exits.
+
+We should extend this subcommand structure to support some new runtime modes,
+with specific purposes that are wise to segregate from the main web process.
+The full list of modes would then be:
+
+| Subcommand       | Arguments | Purpose                                                                                         |                                                                                      |
+|------------------|-----------|-------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------|
+| `version`        |           | print the version and exit                                                                      |                                                                                      |
+| `serve`          |           | run the ia-broker web service                                                                   |                                                                                      |
+| `ingest_landsat` |           | on an interval, parse the scenes CSV found at `LANDSAT_HOST` and index the images it references |                                                                                      |
+| `migrate`        | `[ up     | down MIGRATION_NUMBER ]`                                                                        | apply the proper upgrade/downgrade migration scripts to the database defined in VCAP |
+
