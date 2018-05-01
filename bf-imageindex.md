@@ -264,19 +264,22 @@ try {
 } catch { // Problem starting new app, downgrade DB, restart old version and fail
   try {
     sh 'cf run-task ${new_app} "bf-ia-broker migrate down ${db_rollback_version}"'
+    sh 'cf delete ${new_app}'
     sh 'cf start ${current_app}'
     exit 'starting new version failed!'
   } catch { // Rollback failed, everything is terrible :(
     exit 'new version start and rollback failed!'
   }
 }
+sh 'cf delete ${current_app}''
+
+// Handle route updates to use new_app
 ```
 
-This change would be neessary both in the regular `JenkinsFile` and in 
+This change would be neessary both in the regular `JenkinsFile` and in
 `JenkinsFile.Promote`. It could be somewhat avoided/simplified if we wanted to
 either assume the risk of race conditions at launch time.
 
 > **Note:** `bf-api` currently performs Liquibase migrations at server startup,
 > and never rolls back on a failed start, which can lead to a corrupted database
 > on a failed deploy. It should receive a similar enhancement.
-
