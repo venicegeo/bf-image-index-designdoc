@@ -195,5 +195,88 @@ The full list of modes would then be:
 | `version`        |           | print the version and exit                                                                      |                                                                                      |
 | `serve`          |           | run the ia-broker web service                                                                   |                                                                                      |
 | `ingest_landsat` |           | on an interval, parse the scenes CSV found at `LANDSAT_HOST` and index the images it references |                                                                                      |
-| `migrate`        | `[ up     | down MIGRATION_NUMBER ]`                                                                        | apply the proper upgrade/downgrade migration scripts to the database defined in VCAP |
+| `migrate`        | <code>\[ up     &#124; down MIGRATION_NUMBER ]</code>`                                                                        | apply the proper upgrade/downgrade migration scripts to the database defined in VCAP |
+
+Delegating to the right piece of code would be done with the `urfave/cli`
+library, which is already in use to route between `version` and `serve`. Most
+notably, this means that all IA Broker code would continue to be packaged as a
+_single_ executable, which simplifies the `cf push` process.
+
+
+#### Long-running Processes: `serve` and `ingest_landsat`
+
+These two processes need to start at `cf start` and keep running. Keeping them
+as separate processes means we can scale one while keeping the other constant,
+or monitor them separately (both in logs and in the PCF UI). Since they use the
+same binary image ("droplet" in CF parlance), we can accomplish this by using
+multiple CF process types in our `Procfile`. This process is documented
+[here](https://www.cloudfoundry.org/blog/build-cf-push-learn-procfiles/). As
+such, our new Procfile would look like:
+
+```
+web: bf-ia-broker serve
+ingest: bf-ia-broker ingest_landsat
+```
+
+Assuming Pivotal CloudFoundry implements the CF specs appropriately, this
+should start both processes in separate containers, and monitor each one
+appropriately &mdash; the web one via HTTP, and the non-web one via Unix
+process.
+
+#### One-off Process: `migrate`
+
+`migrate` poses a challenge. As a one-off script, it should be run using
+`cf run-task` and the appropriate droplet. However, it must:
+
+*   start _after_ the old `serve` and `ingest_landsat` processes shut down,
+    so there is no chance of a race condition during migration
+*   complete _before_ the main `serve` and `ingest_landsat` processes start,
+    so they get their expected database schemas
+*   supply output regarding the version to revert to in case of failure, so
+    that...
+*   in the event of failure of `cf start`, it can run again _before_ the old
+    version of the broker processes gets relaunched
+
+This means a thorough overhaul of the logic in our JenkinsFile, which
+introduces a short downtime while the migration runs. The new logic of the
+"Deploy" step looks something looks like this:
+
+```groovy
+current_app = sh 'cf apps | grep "bf-ia-broker"'
+new_app = "bf-ia-broker-" + version
+
+sh 'cf push ${new_app} --no-start /*other args*/'
+sh 'cf set-env ${new_app} SPACE ${PCF_SPACE}'
+sh 'cf set-env ${new_app} DOMAIN ${PCF_DOMAIN}'
+// More `cf set-env`
+
+sh 'cf stop ${current_app}'
+
+try {
+  db_rollback_version = sh 'cf run-task ${new_app} "bf-ia-broker migrate up"'
+} catch { // Problem migrating, start old version of app and fail
+  sh 'cf start ${current_app}'
+  exit 'migration failed!'
+}
+
+try {
+  sh 'cf start ${new_app}'
+} catch { // Problem starting new app, downgrade DB, restart old version and fail
+  try {
+    sh 'cf run-task ${new_app} "bf-ia-broker migrate down ${db_rollback_version}"'
+    sh 'cf start ${current_app}'
+    exit 'starting new version failed!'
+  } catch { // Rollback failed, everything is terrible :(
+    exit 'new version start and rollback failed!'
+  }
+}
+```
+
+This change would be neessary both in the regular `JenkinsFile` and in 
+`JenkinsFile.Promote`. It could be somewhat avoided/simplified if we wanted to
+either assume the risk of race conditions at launch time.
+
+> **Note:** `bf-api` currently performs Liquibase migrations at server startup,
+> and never rolls back on a failed start, which can lead to a corrupted database
+> on a failed deploy. It should receive a similar enhancement.
 
