@@ -4,6 +4,19 @@ Design for `bf-ia-broker` Self-hosted Image Index
 This is a draft of design suggestions for the upcoming self-hosted image index
 within `bf-ia-broker`.
 
+Contents
+---
+
+-   [Postgres Database Connection](#postgres-database-connection)
+    -   [Connection handling](#connection-handling)
+    -   [Schema management](#schema-management)
+    -   [PostGIS support](#postgis-support)
+    -   [Database best practices](#database-practices)
+-   [Runtime Modes](#runtime-modes)
+    -   [`serve` and `ingest_landsat`](#serve-ingest)
+    -   [`migrate`](#migrate)
+-   [REST API](#rest-api)
+    -   [Endpoints](#endpoints)
 
 Postgres Database Connection
 ---
@@ -61,7 +74,7 @@ rollback.
 More details on the migration runtime mode can be found under [Runtime Modes](#runtime-modes)
 below.
 
-#### PostGIS support (!)
+#### PostGIS support
 
 By default, the `github.com/lib/pq` driver handles unknown types like so:
 
@@ -79,6 +92,9 @@ _If we find no suitable solutions, we may need to roll our own._ If we do, the
 best way would be to create our own implementation of
 [`sql.Scanner`](https://godoc.org/database/sql#Scanner) for each PostGIS
 datatype we need.
+
+
+<a id="database-practices"/>
 
 #### Go database best practices (plus testing!)
 
@@ -203,6 +219,7 @@ notably, this means that all IA Broker code would continue to be packaged as a
 _single_ executable, which simplifies the `cf push` process.
 
 
+<a id="serve-ingest"/>
 #### Long-running Processes: `serve` and `ingest_landsat`
 
 These two processes need to start at `cf start` and keep running. Keeping them
@@ -222,6 +239,8 @@ Assuming Pivotal CloudFoundry implements the CF specs appropriately, this
 should start both processes in separate containers, and monitor each one
 appropriately &mdash; the web one via HTTP, and the non-web one via Unix
 process.
+
+<a id="migrate"/>
 
 #### One-off Process: `migrate`
 
@@ -283,3 +302,11 @@ either assume the risk of race conditions at launch time.
 > **Note:** `bf-api` currently performs Liquibase migrations at server startup,
 > and never rolls back on a failed start, which can lead to a corrupted database
 > on a failed deploy. It should receive a similar enhancement.
+
+REST API
+---
+
+Like the original Planet-based broker functionality, the new image index will
+be accessed via a REST API.
+
+#### Endpoints
