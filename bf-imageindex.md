@@ -440,3 +440,40 @@ functions scattered across multiple files and packages.
 A potential "heirarchy" of these renames, and the provided functionality:
 
 ![](./brokerresult-diagram.png)
+
+Due to how Go handles type conversion, these would be freely "cast"-able between
+each other, allowing to use the right interface for any paricular interaction
+with a result. For example, some potential future code from the image index
+implementation:
+
+```go
+func GetLandsatImage(id string, includeTides bool) (*BrokerResult, error) {
+  image, err := db.GetLandsatIndexedImageByID(id)
+  if err != nil {
+    return nil, err
+  }
+
+  result := NewBrokerResult().(*ImageIndexBrokerResult)
+
+  // Set basic image data
+  result.ID = image.ID
+  result.SetGeometry(image.Geometry)
+  result.SetAcquiredDate(image.AcquiredDate.String())
+  result.SetFileFormat("geotiff")
+
+  // Set band URL properties based on Landsat S3 bucket configuration, image ID
+  result.(LandsatS3BrokerResult).InferS3Bands()
+
+  // Handle tides
+  if includeTides {
+    tides.ApplyTidesData(result.(TidesBrokerResult))
+  }
+  return result
+}
+```
+
+This would be an extensive change, and would have to be done carefully, but it
+will potentially improve code quality, testability, and maintainability of
+`bf-ia-broker` by miles by more closely following Go idiomatic practices.
+
+> **Feedback required**
