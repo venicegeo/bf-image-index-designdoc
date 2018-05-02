@@ -311,3 +311,133 @@ Like the original Planet-based broker functionality, the new image index will
 be accessed via a REST API.
 
 #### Endpoints
+
+The Planet layer of the broker currently provides the following endpoints:
+
+| Endpoint | Output | Purpose |
+| -------- | ------ | ------- |
+| `/planet/discover/<sourceType>`  | `geojson.FeatureCollection`  | Searching imagery of multiple different sources  |
+| `/planet/activate/<sourceType>/<id>`   | `geojson.Feature`  | Triggering availability "activation" of a Rapideye/Planetscope image  |
+| `/planet/<sourceType>/<id>`  | `geojson.Feature`  | Metadata retrieval for a single image  |
+
+The new Landsat image index can mirror the same GeoJSON-based search and metadata
+system that the Planet endpoints are using. Mirroring the activation step is
+unnecessary, as all Landsat images are already "active" in an S3 bucket.
+
+As such, the new endpoints would be:
+
+| Endpoint | Output | Purpose |
+| -------- | ------ | ------- |
+| `/local_index/discover/<sourceType>` | `geojson.FeatureCollection`  |  Searching imagery in the local index (currently `landsat` only for source type) |
+| `/local_index/<sourceType>/<id>` | `geojson.FeatureCollection`  | Metadata retrieval from the local index (currently `landsat` only for source type) |
+
+#### Response data (and future-proof consistency/compatibility)
+
+The endpoint return data is more complicated. The results from searching planet
+are not mere GeoJSON Features/FeatureCollections; they have several specific
+important metadata set in the GeoJSON `properties` that make them actually
+useful. This response schema is not currently standardized in any way, and the
+way the GeoJSON is built is a little
+[opaque and arcane](https://github.com/venicegeo/bf-ia-broker/blob/58a0582/planet/planet.go#L386-L475).
+
+For these reasons, a refactor of the response structure is due, improving
+both old Planet code and providing a reasonable common interface for future
+other data sources.
+
+A common interface for building common broker responses can be accomplished
+by using Go type renaming on top of `geojson.FeatureCollection` and
+`geojson.Feature` to wrap GeoJSON interactions in friendlier functions. For
+example, we can define:
+
+```go
+type BrokerMultiResult geojson.FeatureCollection
+
+func NewBrokerMultiResult() *BrokerMultiResult {
+  return geojson.NewFeatureCollection(nil)
+}
+func (mr *BrokerMultiResult) Append(results ...[]BrokerResult) {
+  mr.Features = append(mr.Features, results...)
+}
+
+type BrokerResult geojson.Feature
+
+func NewBrokerResult() *BrokerResult {
+  return geojson.NewFeature(nil, nil, nil)
+}
+
+func (br *BrokerResult) SetGeometry(geometry interface{}) {
+  br.Geometry = geometry
+  br.Bbox = br.ForceBbox()
+}
+
+func (br *BrokerResult) SetCloudCover(cloudCover float64) {
+  br.Properties["cloud_cover"] = cloudCover
+}
+
+// ... etc
+```
+
+This `BrokerResult` type can then be further renamed to add more specific
+"subclass" features, such as being able to inject Planet asset metadata:
+
+```go
+type PlanetBrokerResult BrokerResult
+
+func (br *PlanetBrokerResult) InjectAssetMetadata(asset planet.Asset) {
+  if asset.ExpiresAt != "" {
+		br.Properties["expires_at"] = asset.ExpiresAt
+	}
+	if asset.Location != "" {
+		br.Properties["location"] = asset.Location
+	}
+	if len(asset.Permissions) > 0 {
+		br.Properties["permissions"] = asset.Permissions
+	}
+	if asset.Status != "" {
+		br.Properties["status"] = asset.Status
+	}
+	if asset.Type != "" {
+		br.Properties["type"] = asset.Type
+	}
+}
+```
+
+> [Old not-typesafe function operating directly on GeoJSON](https://github.com/venicegeo/bf-ia-broker/blob/58a0582/planet/planet.go#L458-L475)
+
+Or implement source-specific behavior to add custom properties:
+
+```go
+type LandsatS3BrokerResult BrokerResult
+
+func (br LandstS3BrokerResult) InferS3Bands() error {
+  id := br.ID.(string)
+  if !landsat.IsValidLandSatID(id) {
+		return errors.New("Not a valid LandSat ID: " + landSatID)
+	}
+
+	awsFolder, prefix, err := landsat.GetSceneFolderURL(landSatID, dataType)
+	if err != nil {
+		return err
+	}
+
+	bands := make(map[string]string)
+	for band, suffix := range landSatBandsSuffixes {
+		bands[band] = awsFolder + prefix + suffix
+	}
+	br.Properties["bands"] = bands
+
+	return nil
+}
+```
+
+> [Old not-typesafe function not encapsulated into any data structure](https://github.com/venicegeo/bf-ia-broker/blob/58a0582/planet/planet.go#L458-L475)
+
+This approach takes advantage of Go's strong typing to rigidly define what our
+results are, what they can do, and how various pieces of them are constructed.
+Contrasted with the current approach of various data conversion/building
+functions scattered across multiple files and packages.
+
+A potential "heirarchy" of these renames, and the provided functionality:
+
+<div class="mxgraph" style="max-width:100%;border:1px solid transparent;" data-mxgraph="{&quot;highlight&quot;:&quot;#0000ff&quot;,&quot;nav&quot;:true,&quot;resize&quot;:true,&quot;toolbar&quot;:&quot;zoom layers lightbox&quot;,&quot;xml&quot;:&quot;&lt;mxfile userAgent=\&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/65.0.3325.181 Safari/537.36\&quot; version=\&quot;8.5.15\&quot; editor=\&quot;www.draw.io\&quot; type=\&quot;google\&quot;&gt;&lt;diagram id=\&quot;b1783ed7-976a-3379-d24e-922a934db6df\&quot; name=\&quot;Page-1\&quot;&gt;7Vpfb+I4EP80SNxDV0kcAjwSKLeVtqfVcdLePRoySdx17KxxCuynv3HiFEKhi06gUHo8QDwe2+Pf/PM4dMg4W/+uaJ4+ygh4x3OidYdMOp7n+t4AfwxlU1EGQb8iJIpFlmlLmLGfYImOpRYsgmWDUUvJNcubxIUUAha6QaNKyVWTLZa8uWpOE3hFmC0of039xiKd2l30nC39M7AkrVd2Hdszp4vviZKFsOt1PBKXn6o7o/Vcln+Z0kiudkjkvkPGSkpdPWXrMXCDbQ1bNW56pPdFbgVCnzKABPPYG/qOPyRur++SO9cq6pnyAuo9lJLqTY0ORAiWbUqlU5lIQfn9lhqWCIBZw8FWqjOOjy4+PoHWG6tvWmiJpO0MX6TMLV+1plno6MYsaSkLtYBju+lZ46EqAX2MKXgBHg0aZAZabXCQAk41e25KQK1lJS98W3TxwQJ8Kti9A2AHHAUN8wbkwY/CWESY4T6Y6JAR9jr5Gr9LrJyKfqcNfqbP3+nTsNZ3lLPEjlsggqC2c+JTYn/Llec1Abf4tJTi0xSoLhTU/bjL+f4YpOX7tFSZLdSuXa/mHl/4P22ZQ6x39nxs7kMCXmY9w/swqViYQTqmaJ79sNOftCNMOJfriqnTCzu9Scwl1YHfjjAv7nU9+HxVMgelmck3o3JsjkAttWIiQbhOknEvQD6b+TCbjCqvm5R+GVofnFRShRK5UBcm+MfMxIwwlkLb2Oh6tj2lGeMmi34G/gxm1mZAtQEEF4T126HydYCzA0idjGyydvufbFxabXOfV2e4dDfv1cSzRsU649xICgpOSEHHNHT5FEScc2KLyKjN35ZeNv4xDbSnK8W9tdRP3I+MuztoDfezxpL3hrvnt4b74CK4u+8Dd9Ia7rV411lioIa/g/oTlgXS32d9YXhnoGuldvfOi7+1c6hFicZcFtHYnDK79sjfniyoYckLzaRoX5bR4kfBFEQTqqFbHfPbE2YGYinVHzRrX5Qp4zCVKqP6bVHed63jN2sdz/UOFDtucKjYIRcpdtxrjs9fORXwZmS+wVA+gZjiJrb3At2WnPJBPMFCj5ZL0I+gaUQ17Zatm/TMpmMS56Bj9g84Zv8ifulfs19i2tBMmJcuJ3jmjPzvmxfwzRgUIktFVMrggFJS3aBfBnuO6ZOWHfOqC5q/yveWHytfmj23f6w3Ujwy4fnplchC17+W5aYigxecHBkGl4gM7uCaI8MXkymovplk/GETIOkdej920MyDS5g5Ia/MfJbDgiF+PyHCDlMnGEvd5CYV7WFv7LcJERb7aJBjyVF7ZCKkMDevBvI9Uq0fa/Ek3FdjxqKovLZdpUzDLKflnelKUaPd5lXuOdQy7J1QyfsHtOJdRCtXXS88ZDSBB1TA+mOcTbpCYpeAFX7HhViYm8flLebg/dg0bDk2DX8Rm+yrFOOC1uZUrYkbj1f74erg/caZwhU2t38hLPt2/qdJ7v8F&lt;/diagram&gt;&lt;/mxfile&gt;&quot;}"></div>
+<script type="text/javascript" src="https://www.draw.io/js/viewer.min.js"></script>
