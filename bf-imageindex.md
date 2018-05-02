@@ -331,7 +331,7 @@ As such, the new endpoints would be:
 | `/local_index/discover/<sourceType>` | `geojson.FeatureCollection`  |  Searching imagery in the local index (currently `landsat` only for source type) |
 | `/local_index/<sourceType>/<id>` | `geojson.FeatureCollection`  | Metadata retrieval from the local index (currently `landsat` only for source type) |
 
-#### Response data (and future-proof consistency/compatibility)
+#### Response data structure (and future-proof consistency/compatibility)
 
 The endpoint return data is more complicated. The results from searching planet
 are not mere GeoJSON Features/FeatureCollections; they have several specific
@@ -345,135 +345,122 @@ both old Planet code and providing a reasonable common interface for future
 other data sources.
 
 A common interface for building common broker responses can be accomplished
-by using Go type renaming on top of `geojson.FeatureCollection` and
-`geojson.Feature` to wrap GeoJSON interactions in friendlier functions. For
-example, we can define:
+by using a simpler intermediate data structure that explicitly describes (using
+proper types/functions):
+
+-   the data it encapsulates, using types as accurately as possible
+-   associated metadata, defined as narrowly as possible
+-   a conversion process to GeoJSON
+
+For example:
 
 ```go
-type BrokerMultiResult geojson.FeatureCollection
+type BrokerFileFormat string
+const GeoTIFF BrokerFileFormat = "geotiff"
+const JPEG2000 BrokerFileFormat = "jpeg2000"
 
-func NewBrokerMultiResult() *BrokerMultiResult {
-  return geojson.NewFeatureCollection(nil)
-}
-func (mr *BrokerMultiResult) Append(results ...[]BrokerResult) {
-  mr.Features = append(mr.Features, results...)
-}
-
-type BrokerResult geojson.Feature
-
-func NewBrokerResult() *BrokerResult {
-  return geojson.NewFeature(nil, nil, nil)
-}
-
-func (br *BrokerResult) SetGeometry(geometry interface{}) {
-  br.Geometry = geometry
-  br.Bbox = br.ForceBbox()
+type BasicBrokerResult struct {
+  ID string
+  Geometry interface{}
+  CloudCover float64
+  Resolution float64
+  AcquiredDate time.Time
+  SensorName string
+  FileFormat BrokerFileFormat
 }
 
-func (br *BrokerResult) SetCloudCover(cloudCover float64) {
-  br.Properties["cloud_cover"] = cloudCover
-}
-
-// ... etc
-```
-
-This `BrokerResult` type can then be further renamed to add more specific
-"subclass" features, such as being able to inject Planet asset metadata:
-
-```go
-type PlanetBrokerResult BrokerResult
-
-func (br *PlanetBrokerResult) InjectAssetMetadata(asset planet.Asset) {
-  if asset.ExpiresAt != "" {
-		br.Properties["expires_at"] = asset.ExpiresAt
-	}
-	if asset.Location != "" {
-		br.Properties["location"] = asset.Location
-	}
-	if len(asset.Permissions) > 0 {
-		br.Properties["permissions"] = asset.Permissions
-	}
-	if asset.Status != "" {
-		br.Properties["status"] = asset.Status
-	}
-	if asset.Type != "" {
-		br.Properties["type"] = asset.Type
-	}
+func (br BasicBrokerResult) GeoJSONFeature() *geojson.Feature {
+  f := geojson.NewFeature(br.Geometry, br.ID, map[string]interface{
+    "cloudCover": br.CloudCover,
+    "resolution": br.Resolution,
+    "acquiredDate": br.AcquiredDate.String(),
+    "sensorName": br.SensorName,
+  })
+  f.Bbox = f.ForceBbox()
+  return f
 }
 ```
 
-> [Old not-typesafe function operating directly on GeoJSON](https://github.com/venicegeo/bf-ia-broker/blob/58a0582/planet/planet.go#L458-L475)
-
-Or implement source-specific behavior to add custom properties:
+More specialized types of results, such as a result containing tide data, can be
+encapsulated in their own purpose-made structs that know how to insert their
+data in-place into a feature collection. For example, planet asset metadata, and
+tides data, could look like this:
 
 ```go
-type LandsatS3BrokerResult BrokerResult
-
-func (br LandstS3BrokerResult) InferS3Bands() error {
-  id := br.ID.(string)
-  if !landsat.IsValidLandSatID(id) {
-		return errors.New("Not a valid LandSat ID: " + landSatID)
-	}
-
-	awsFolder, prefix, err := landsat.GetSceneFolderURL(landSatID, dataType)
-	if err != nil {
-		return err
-	}
-
-	bands := make(map[string]string)
-	for band, suffix := range landSatBandsSuffixes {
-		bands[band] = awsFolder + prefix + suffix
-	}
-	br.Properties["bands"] = bands
-
-	return nil
+type PlanetAssetMetadata struct {
+  AssetURL string
+  ActivationURL string
+  ExpiresAt time.Time
+  Permissions []string
+  Status string
+  Type string
 }
-```
 
-> [Old not-typesafe function not encapsulated into any data structure](https://github.com/venicegeo/bf-ia-broker/blob/58a0582/planet/planet.go#L458-L475)
-
-This approach takes advantage of Go's strong typing to rigidly define what our
-results are, what they can do, and how various pieces of them are constructed.
-Contrasted with the current approach of various data conversion/building
-functions scattered across multiple files and packages.
-
-A potential "heirarchy" of these renames, and the provided functionality:
-
-![](./brokerresult-diagram.png)
-
-Due to how Go handles type conversion, these would be freely "cast"-able between
-each other, allowing to use the right interface for any paricular interaction
-with a result. For example, some potential future code from the image index
-implementation:
-
-```go
-func GetLandsatImage(id string, includeTides bool) (*BrokerResult, error) {
-  image, err := db.GetLandsatIndexedImageByID(id)
-  if err != nil {
-    return nil, err
+func PlanetAssetMetadataFromAssets(assets planet.Assets) PlanetAssetMetadata {
+  return PlanetAssetMetadata{
+    AssetURL: assets.Analytic.Location,
+    ActivationURL: assets.Analytic.Links.Activate,
+    ExpiresAt: time.Parse(time.RFC3339, assets.Analytic.ExpiresAt),
+    Permissions: assets.Analytic.Permissions,
+    Status: assets.Analytic.Status,
+    Type: assets.Analytic.Type,
   }
+}
 
-  result := NewBrokerResult().(*ImageIndexBrokerResult)
+func (pam PlanetAssetMetadata) ApplyToGeoJSONFeature(f *geojson.Feature) {
+  f.Properties["expires_at"] = pam.ExpiresAt.Format(time.RFC3339)
+  f.Properties["location"] = pam.Location
+  f.Properties["permissions"] = pam.Permissions
+  f.Properties["status"] = pam.Status
+  f.Properties["type"] = pam.Type
+}
 
-  // Set basic image data
-  result.ID = image.ID
-  result.SetGeometry(image.Geometry)
-  result.SetAcquiredDate(image.AcquiredDate.String())
-  result.SetFileFormat("geotiff")
+type TidesData struct {
+  Current float64
+  Max24h float64
+  Min24h float64
+}
 
-  // Set band URL properties based on Landsat S3 bucket configuration, image ID
-  result.(LandsatS3BrokerResult).InferS3Bands()
-
-  // Handle tides
-  if includeTides {
-    tides.ApplyTidesData(result.(TidesBrokerResult))
-  }
-  return result
+func (td TidesData) ApplyToGeoJSONFeature(f *geojson.Feature) {
+  f.Properties["currentTide"] = td.Current
+  f.Properties["maximumTide24Hours"] = td.Max24h
+  f.Properties["minimumTide24Hours"] = td.Min24h
 }
 ```
 
-This would be an extensive change, and would have to be done carefully, but it
-will potentially improve code quality, testability, and maintainability of
-`bf-ia-broker` by miles by more closely following Go idiomatic practices.
+This means that these "mixins" can be combined like so:
 
-> **Feedback required**
+```go
+type PlanetActivateableBrokerResult struct {
+  BasicBrokerResult
+  PlanetAssetMetadata
+  *TidesData
+}
+
+func (result PlanetActivateableBrokerResult) GeoJSONFeature() *geojson.Feature {
+  f := result.BasicBrokerResult.GeoJSONFeature()
+  result.PlanetAssetMetadata.ApplyToGeoJSONFeature(f)
+  if (result.TidesData != nil) {
+    result.TidesData.ApplyToGeoJSONFeature(f)
+  }
+  return f
+}
+```
+
+This `PlanetActivateableBrokerResult` object accomplishes our goals: it
+contains the precise pieces of data describing a search result from Planet, in
+an easy to comprehend structure, using Go type safety to validate access, and
+has an efficient way to convert itself into GeoJSON for output. This is a much
+more preferable &mdash; and more modular/extensible way &mdash; to generate
+results than our current way.
+
+Some provisional data structures that would be involved in building different
+sorts of responses:
+
+![](./broker-classes.png)
+
+Their relationships can be illustrated as such:
+
+![](/broker-diagram.png)
+
+> The source document for these illustrations can be found [here](https://drive.google.com/open?id=1K1A6W23VqYsQ2mCdesDIlJNiVkCGtLeU).
