@@ -455,12 +455,12 @@ more preferable &mdash; and more modular/extensible way &mdash; to generate
 results than our current way.
 
 Some provisional data structures that would be involved in building different
-sorts of responses:
+sorts of responses: [broker-classes.png](broker-classes.png)
 
-<img src="broker-classes.png" />
+![](broker-classes.png)
 
-Their relationships can be illustrated as such:
+Their relationships can be illustrated as such: [broker-diagram.png](broker-diagram.png)
 
-<img src="broker-diagram.png" />
+![](broker-diagram.png)
 
 > The source document for these illustrations can be found [here](https://drive.google.com/open?id=1K1A6W23VqYsQ2mCdesDIlJNiVkCGtLeU).
