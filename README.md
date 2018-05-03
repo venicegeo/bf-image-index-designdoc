@@ -517,11 +517,11 @@ Database
 
 A potential schema for Landsat 8 in PostGRES.
 
-|name|type|Comments|
-|---|---|---|
-product_id|text|indexed|
-capture_date|timestamp| |
-cloud_cover|real| |
-scene_url|text| |
-aoi|geometry|spatial index|
-off_nadir_angle|Real| |
+| name            | type      | Comments      |
+|-----------------|-----------|---------------|
+| product_id      | text      | indexed       |
+| capture_date    | timestamp |               |
+| cloud_cover     | real      |               |
+| scene_url       | text      |               |
+| aoi             | geometry  | spatial index |
+| off_nadir_angle | Real      |               |
