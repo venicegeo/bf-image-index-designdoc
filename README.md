@@ -464,3 +464,45 @@ Their relationships can be illustrated as such: [broker-diagram.png](#file-broke
 ![](broker-diagram.png)
 
 > The source document for these illustrations can be found [here](https://drive.google.com/open?id=1K1A6W23VqYsQ2mCdesDIlJNiVkCGtLeU).
+
+Landsat 8 Ingest
+---
+## Overview
+Landsat 8 scenes are available as Open Data on AWS.
+
+Each scene consists of a number of files:  
+* 11 GeoTiffs corresponding to the imaged bands.
+* A Quality Assesment image
+* A metadata file
+* Jpeg thumbnails
+
+Each scene corresponds to a WRS-2 path/row. The boundaries of each path/row pair are published as ESRI shape files as well as in a tabular format.
+
+## Process
+
+At a high level, the ingest process will have two distinct phases.
+
+### Phase 1: Create records for new scenes
+This phase parses the unsorted list of available scenes and adds any new/missing entires to the database. The basic steps will be as follows:
+* Download the csv describing all available scenes (available on AWS).
+* Begin a database transaction
+  * (The transaction is not strictly necessary, but is likely to significantly increase performance.)
+* For each scene entry in the csv, insert a record into the database if it is missing. The record will be populated with the meta-data that is available in the CSV; for example:
+  * The scene id 
+  * The acquisition date
+  * Cloud cover proportion
+  * A polygon describing the boundary of the image. This can be computed from the WRS-2 row/path pair.
+  * The url of the S3 bucket containing the scene's component files.
+* Commit the database transaction
+
+### Phase 2: Populate metadata
+Some useful metadata is not provided in the CSV file listing avaiable scenes. In order to get these values, additional files will need to be downloaded, e.g. the scene's associated MTL.txt file. 
+Performing the metadata population as a separate phase ensures the relatively slow and expensive process is never performed for scene records the are already complete.
+
+* Query database, selecting all scenes with missing/incomplete metadata
+* For each scene record:
+  * Download and parse necessary files. 
+  * Calculate metadata values, e.g. off_nadir_angle.
+  * Update database record
+
+![](ingest-sequence.png)
