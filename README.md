@@ -19,6 +19,13 @@ Contents
     -   [Endpoints](#endpoints)
     -   [Response data structure](#response-data)
 -   [Landsat 8 Ingest](#landsat-8-ingest)
+-   [Map Thumbnails/Tiles](#map-thumbnails-tiles)
+    -   [Available data](#available-data)
+    -   [New HTTP endpoint](#new-http-endpoint)
+-   [Non-Broker Compatibility Changes](#non-broker-compatibility-changes)
+    -   [General changes](#general-changes)
+    -   [`bf-api` changes](#bf-api-changes)
+    -   [`bf-ui` changes](#bf-ui-changes)
 
 Postgres Database Connection
 ---
@@ -525,3 +532,117 @@ A potential schema for Landsat 8 in PostGRES.
 | scene_url       | text      |               |
 | aoi             | geometry  | spatial index |
 | off_nadir_angle | Real      |               |
+
+
+Map Thumbnails/Tiles
+---
+
+The current way that image thumbnails (map tiles) are processed uses Planet's
+[Tile and Basemap Services](https://www.planet.com/docs/reference/tile-services/).
+This is the process that is followed:
+
+1.  The user uses `bf-ui` to perform an imagery search
+2.  `bf-ui` passes the request to `bf-ia-broker`, which performs the search and
+    returns a GeoJSON feature collection containing all the relevant images
+    -   Most notably, each image contains its data type (e.g. `Landsat8C`) and
+        its ID
+3.  Using a configured
+    ["XYZ" standard](https://www.planet.com/docs/reference/tile-services/#xyz)
+    tile provider, `bf-ui` tells the OpenLayers map to display a tile from
+    `https://tiles.planet.com/data/v1/<datatype>/<id>/<Z>/<X>/<Y>.png`
+    -   The `Z`, `X` and `Y` values are injected by OpenLayers and not managed
+        ny `bf-ui` directly
+
+Since the Landsat S3 archive lacks support for this type of interaction with an
+XYZ type API, it falls to Beachfront to implement this.
+
+#### Available data
+
+In addition to the metadata we ingest and the Landsat imagery itself, the S3
+bucket provides some true-color images that can be used as map tiles. For
+example, given this index link (from the ingested scenes CSV) :
+
+> <https://s3-us-west-2.amazonaws.com/landsat-pds/c1/L8/009/066/LC08_L1TP_009066_20170406_20170414_01_T1/index.html>
+
+The "thumbnail" in two different sizes can be found here:
+
+-   Large (typically a few hundred KB):
+    <https://s3-us-west-2.amazonaws.com/landsat-pds/c1/L8/009/066/LC08_L1TP_009066_20170406_20170414_01_T1/LC08_L1TP_009066_20170406_20170414_01_T1_thumb_large.jpg>
+-   Small (typically only a few KB):
+    <https://s3-us-west-2.amazonaws.com/landsat-pds/c1/L8/009/066/LC08_L1TP_009066_20170406_20170414_01_T1/LC08_L1TP_009066_20170406_20170414_01_T1_thumb_small.jpg>
+
+> **Note:** Since these tiles are provided by Landsat itself, not generic tiles
+> provided by Planet, they may look different (color balance, brightness, etc).
+
+Given the fact that we only display one of these images at a time, and detail
+is important when zoomed in, it makes the most sense to use the large thumbnail
+wherever possible. As we also do not host these thumbs ourselves, it makes sense
+to redirect OpenLayers' request for a tile to the appropriate image on S3.
+
+This means that when asked for a thumb of an image with a particular ID, we
+can retrieve its base directory in S3 (from our ingested database) and redirect
+to a URL formatted as: `<BASE_IMAGE_DIR>/<ID>_thumb_large.jpg`. This also
+simplifies our implementation.
+
+> **Note:** the Planet-based implementation of thumbnail map tiles served PNG
+> formatted images, while the Landsat S3 bucket provides JPEG formatted
+> images. This is not expected to be a difficulty (given browsers' flexibility)
+> but it is worth noting.
+
+#### New HTTP endpoint
+
+To accomplish this redirect, we must implement a new "tiles" endpoint for
+`bf-ia-broker`:
+
+```
+GET /local_index/<type>/<id>/<Z>/<X>/<Y>.jpg
+```
+
+This endpoint would have one of two outcomes:
+
+-   If the type (currently landsat-only) and ID refer to an image we actually
+    have indexed in our DB, it returns an `HTTP 302 Found` with the `Location`
+    header set to the aforementioned thumb URL in S3.
+-   Otherwise, it returns `HTTP 404 Not Found`
+
+This behavior is _independent of the X, Y and Z values provided_. The XYZ
+arguments are there for XYZ standard compatibility, but since we already have
+the tile ID, there is no need to filter by latitude/longitude (X/Y) nor by
+zoom (as we are only using the "large" thumb).
+
+
+Non-Broker Compatibility Changes
+---
+
+While the largest aspects of this change affect `bf-ia-broker`, other
+Beachfront component will also need some compatibility changes.
+
+#### General changes
+
+**New beachfront scene ID prefix.** When Beachfront passes a canonical string
+referring to a scene, the ID is formatted as `<source_prefix>:<external_id>`.
+For example, a Sentinel scene ID may be:
+`sentinel:S2A_MSIL1C_20161208T184752_N0204_R070_T11SKC_20161208T184750`.
+
+To differentiate between Landsat images indexed by Planet (prefix `landsat`)
+versus those indexed by Beachfront, we must implement a new source prefix for
+our new image source. Additionally, for clarity, we ought to rename the Planet
+scene prefix. Proposed names:
+
+-   Planet Landsat index: `landsat-planet`
+-   Local Landsat index: `landsat-indexed`
+
+#### `bf-api` changes
+
+> **TODO**: Recognize and use new image source for job startup
+
+#### `bf-ui` changes
+
+**Landsat S3 locally indexed preview tiles.** To start using this new tile
+provider API, `bf-ui` must be changed. Mainly, it requires a new entry in the
+`SCENE_TILE_PROVIDERS` configuration variable, exposing a provider that matches
+the `landsat-indexed` prefix and points to the `bf-api` URL:
+`/ia/local_index/landsat/__SCENE_ID__/{z}/{y}/{x}.jpg`.
+
+> **TODO**: Recognize and use new image source for source type dropdown and
+> image search
